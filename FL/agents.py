@@ -37,7 +37,7 @@ class Worker():
         weightgrads = []
         for layer, paramval in self.model.named_parameters():
             weightgrads.append(paramval.grad)
-        return weightgrads, lossval.detach().numpy()
+        return weightgrads, lossval.detach().cpu().numpy()
 
 
 class Agg():
