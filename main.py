@@ -1,3 +1,4 @@
+import copy
 import time
 import argparse
 import numpy as np
@@ -24,6 +25,17 @@ def rule(ups_list):  # ups_list is a list of list of tensors
             for i in range(len(ups_list[0]))]
 
 
+def noniid_batch_trainset(trainset, targets):
+    """ Return trainset whose targets are in list c """
+    # indices = (np.array(trainset.targets) in c)
+    indices = np.where(np.isin(np.array(trainset.targets), targets))[0]
+    # indices = list(indices)
+    trainset2 = copy.deepcopy(trainset)
+    trainset2.data = trainset2.data[indices]
+    trainset2.targets = np.array(trainset2.targets)[indices]
+    return trainset2
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_workers', type=int, default=5,
@@ -34,6 +46,10 @@ if __name__ == '__main__':
                         help='number of train epochs')
     parser.add_argument('--learning_rate', type=float, default=0.001,
                         help='number of train epochs')
+    parser.add_argument('--delay', type=int, default=100,
+                        help='delay in between slow worker')
+    parser.add_argument('--model_dir', type=str,
+                        help='path to model to load (pretrained)')
     args = parser.parse_args()
 
     # Writer will output to ./runs/ directory by default
@@ -43,8 +59,9 @@ if __name__ == '__main__':
     n_epochs = args.n_epochs
     batch_size = args.batch_size
     learning_rate = args.learning_rate
-    noniid = False
-    load_model = False
+    noniid = True
+    load_model = True
+    save_model = False
 
     transform = torchvision.transforms.Compose(
         [torchvision.transforms.ToTensor(),
@@ -56,17 +73,13 @@ if __name__ == '__main__':
     testset = torchvision.datasets.CIFAR10(
         root='../data', train=False, download=True, transform=transform)
 
+    # slow_guys = 9
     # Batch Loaders
     if noniid:
-        def noniid_batch_trainset(trainset, c):
-            indices = (np.array(trainset.targets) == c)
-            trainset2 = copy.deepcopy(trainset)
-            trainset2.data = trainset2.data[indices]
-            trainset2.targets = [c for i in range(len(indices))]
-
-            return trainset2
-
-        trainsets = [noniid_batch_trainset(trainset, i) for i in set(trainset.targets)]
+        targets = [[0, 2, 3, 4, 5, 6, 7, 8], [1, 9]]
+        trainsets = [noniid_batch_trainset(trainset, targets[0]) for _ in range(n_workers - 1)]
+        trainsets.append(noniid_batch_trainset(trainset, targets[1]))
+        # trainsets = [noniid_batch_trainset(trainset, i) for i in set(trainset.targets)]
     else:
         trainsets = [trainset]
 
@@ -84,8 +97,9 @@ if __name__ == '__main__':
     # Setup Learning Model
     model = PerformantNet1()
     if load_model:
-        model.load_state_dict(torch.load("PerformantNet1_10epochs.pt"))
-        n_epochs = 0
+        model.load_state_dict(torch.load("saved_model_100.pt"))
+        model.eval()
+        # n_epochs = 0
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     cpu_device = torch.device("cpu")
@@ -104,7 +118,7 @@ if __name__ == '__main__':
     epochs = []
     accuracies = []
 
-    pesky_worker = []
+    pesky_worker_grads = []
     # Training Loop
     for t in tqdm(range(n_epochs)):
         first_time = time.time()
@@ -115,6 +129,8 @@ if __name__ == '__main__':
 
         dataiters = [iter(trainloader) for trainloader in trainloaders]
 
+        # slow_guys = 9
+
         # Worker Loop
         for i in range(n_workers):
             k = np.random.randint(0, len(dataiters))
@@ -123,19 +139,35 @@ if __name__ == '__main__':
             batch_inp, batch_outp = dataiter.next()
             batch_inp, batch_outp = batch_inp.to(device), batch_outp.to(device)
 
-            worker_list[i].model = central.model
+            if False:
+                worker_list[i].model = central.model
+                ups, loss = worker_list[i].fwd_bkwd(batch_inp, batch_outp)
+                weight_ups.append(ups)
+                losses.append(loss)
+            else:
+                if i == n_workers - 1:
+                    # for _ in range(slow_guys):
+                    ups = None
+                    if t == 0:
+                        worker_list[i].model = central.model
+                        ups, loss = worker_list[i].fwd_bkwd(batch_inp, batch_outp)
+                        pesky_worker_grads.append(ups)
+                        ups = None
+                    elif t % args.delay == 0:
+                        worker_list[i].model = central.model
+                        ups, loss = worker_list[i].fwd_bkwd(batch_inp, batch_outp)
+                        pesky_worker_grads.append(ups)
+                        ups = pesky_worker_grads.pop(0)
 
-            ups, loss = worker_list[i].fwd_bkwd(batch_inp, batch_outp)
-
-            # if i == 0 and t > 5:
-            #     pesky_worker.append(ups)
-            #     ups = pesky_worker.pop(0)
-            # elif i == 0:
-            #     pesky_worker.append(ups)
-            #     continue
-
-            weight_ups.append(ups)
-            losses.append(loss)
+                    if ups is not None:
+                        # print('<=======Updating======>')
+                        weight_ups.append(ups)
+                        # losses.append(loss)
+                else:
+                    worker_list[i].model = central.model
+                    ups, loss = worker_list[i].fwd_bkwd(batch_inp, batch_outp)
+                    weight_ups.append(ups)
+                    losses.append(loss)
 
         # Aggregate Worker Gradients
         weight_ups_FIN = agg.rule(weight_ups)
@@ -146,14 +178,29 @@ if __name__ == '__main__':
 
         central.model.eval()
 
+        if t % 100 == 0 and t > 0 and save_model:
+            print('Saving model...')
+            torch.save(central.model.state_dict(), "saved_model_{}.pt".format(t))
+
         # if t > 0 and t % 100 == 0:
         #     print('Epoch: {}, Time to complete: {}'.format(t, time.time() - first_time))
 
-        if t % 250 == 0 and t > 0:
+        if t % 100 == 0 and t > 0:
             # print('Epoch: {}'.format(t))
-            accuracy = print_test_accuracy(model, testloader)
+            all_accuracies = print_test_accuracy(model, testloader)
+            # import pdb; pdb.set_trace()
+            avg_accuracy = np.mean(all_accuracies)
             epochs.append(t)
-            accuracies.append(accuracy)
-    accuracy = print_test_accuracy(model, testloader)
-    accuracies.append(accuracy)
+            accuracies.append(avg_accuracy)
+
+            writer.add_scalar('Avg. Test Accuracy', avg_accuracy, t)
+            writer.add_scalar('Class 9 Test Accuracy', all_accuracies[-1], t)
+
+    all_accuracies = print_test_accuracy(model, testloader)
+    avg_accuracy = np.mean(all_accuracies)
+    accuracies.append(avg_accuracy)
+
+    writer.add_scalar('Avg. Test Accuracy', avg_accuracy, t)
+    writer.add_scalar('Class 9 Test Accuracy', all_accuracies[-1], t)
+
     print('Done training')
