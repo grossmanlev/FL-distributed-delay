@@ -45,3 +45,13 @@ python3 main.py --n_epochs 1500 --n_workers 10 --delay 50 --model_file warm_star
 ```
 python3 main.py --n_epochs 1500 --n_workers 10 --delay 50 --throttle
 ```
+
+NOTE: All training losses and accuracies can be checked in real-time using tensorboard:
+```
+tensorboard --logdir=runs
+```
+
+Plus, all previously run experiments can be viewed by running, for example:
+```
+tensorboard --logdir=runs_delay
+```
