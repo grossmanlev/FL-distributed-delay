@@ -46,7 +46,7 @@ if __name__ == '__main__':
                         help='number of train epochs')
     parser.add_argument('--delay', type=int, default=100,
                         help='delay in between slow worker')
-    parser.add_argument('--model_dir', type=str,
+    parser.add_argument('--model_file', type=str,
                         help='path to model to load (pretrained)')
     parser.add_argument('--throttle', action='store_true',
                         help='toggle whether to use gradient throttling')
@@ -60,7 +60,6 @@ if __name__ == '__main__':
     batch_size = args.batch_size
     learning_rate = args.learning_rate
     noniid = True
-    load_model = True
     save_model = False
 
     transform = torchvision.transforms.Compose(
@@ -96,8 +95,8 @@ if __name__ == '__main__':
 
     # Setup Learning Model
     model = PerformantNet1()
-    if load_model:
-        model.load_state_dict(torch.load("saved_model_100.pt"))
+    if args.model_file is not None:
+        model.load_state_dict(torch.load(args.model_file))
         model.eval()
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
